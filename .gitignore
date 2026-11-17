@@ -1,0 +1,19 @@
+# Buildozer / Android build artifacts
+.buildozer/
+bin/
+
+# Python cache and environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+.venv
+env/
+venv/
+
+# Sensitive data / app state
+credentials.json
+settings.json
+data/
+*.log
