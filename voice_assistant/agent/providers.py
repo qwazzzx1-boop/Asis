@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 import json
 from typing import Any, Protocol
@@ -10,108 +11,160 @@ class ModelProvider(Protocol):
 
 
 class OllamaProvider:
-    def __init__(self, base_url: str, model: str): self.base_url, self.model = base_url.rstrip("/"), model
+    def __init__(self, base_url: str, model: str):
+        self.base_url, self.model = base_url.rstrip("/"), model
 
-    def _request(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
-        body = json.dumps({"model": self.model, "messages": messages, "tools": tools or None, "stream": False}).encode()
-        request = Request(self.base_url + "/api/chat", data=body, headers={"Content-Type": "application/json"}, method="POST")
-        with urlopen(request, timeout=120) as response: return json.loads(response.read(4_000_000))
+    def _request(self, messages, tools):
+        body = json.dumps({
+            "model": self.model,
+            "messages": messages,
+            "tools": tools or None,
+            "stream": False,
+        }, ensure_ascii=False).encode("utf-8")
+        request = Request(
+            self.base_url + "/api/chat",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=120) as response:
+            return json.loads(response.read(4_000_000))
 
-    async def respond(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+    async def respond(self, messages, tools):
         data = await asyncio.to_thread(self._request, messages, tools)
-        return data.get("message", {})
+        message = data.get("message")
+        if not isinstance(message, dict):
+            raise RuntimeError("Ollama вернул ответ неверного формата")
+        return message
 
 
 class AnthropicProvider:
-    """Optional cloud adapter. Prompt content is sent to Anthropic when selected."""
-    def __init__(self, api_key: str, model: str): self.api_key, self.model = api_key, model
+    """Anthropic adapter preserving IDs and grouping tool results correctly."""
+    def __init__(self, api_key: str, model: str):
+        self.api_key, self.model = api_key, model
 
-    async def respond(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
-        try: import anthropic
-        except ImportError as exc: raise RuntimeError("Install anthropic to enable the Claude provider") from exc
+    async def respond(self, messages, tools):
+        try:
+            import anthropic
+        except ImportError as exc:
+            raise RuntimeError("Для Claude требуется пакет anthropic") from exc
+
         system = (
-            "Ты — голосовой мобильный ассистент на телефоне Android. Общайся на русском. "
-            "Используй tools для действий. Не утверждай что действие выполнено без результата от tool. "
-            "Пользователь может использовать русские сокращения: тг=Telegram, дс=Discord, ют=YouTube, вк=ВКонтакте, инста=Instagram, спотифай=Spotify и т.д. "
-            "Для сложных запросов выполняй tool calls последовательно."
+            "Ты — голосовой мобильный ассистент на Android. Общайся на русском. "
+            "Используй инструменты для действий и не заявляй об успехе без их результата. "
+            "Не обходи подтверждения инструментов."
         )
         converted = []
-        last_tool_ids: dict[str, str] = {}
-        for index, message in enumerate(messages):
+        index = 0
+        while index < len(messages):
+            message = messages[index]
             role = message.get("role")
             if role == "system":
+                index += 1
                 continue
+
             if role == "assistant" and message.get("tool_calls"):
                 blocks = []
-                if message.get("content"): blocks.append({"type": "text", "text": message["content"]})
-                for call_index, call in enumerate(message["tool_calls"]):
+                if message.get("content"):
+                    blocks.append({"type": "text", "text": str(message["content"])})
+                for call in message["tool_calls"]:
                     fn = call.get("function", {})
-                    call_id = f"toolu_{index}_{call_index}"
-                    last_tool_ids[fn.get("name", "")] = call_id
                     args = fn.get("arguments", {})
-                    if isinstance(args, str): args = json.loads(args)
-                    blocks.append({"type": "tool_use", "id": call_id, "name": fn["name"], "input": args})
+                    if isinstance(args, str):
+                        args = json.loads(args)
+                    blocks.append({
+                        "type": "tool_use",
+                        "id": str(call.get("id") or ""),
+                        "name": fn["name"],
+                        "input": args,
+                    })
                 converted.append({"role": "assistant", "content": blocks})
-            elif role == "tool":
-                call_id = last_tool_ids.get(message.get("name", ""))
-                if call_id:
-                    converted.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": call_id, "content": str(message.get("content", ""))}]})
-            else:
-                converted.append({"role": role, "content": message.get("content", "")})
-        api_tools = [{"name": t["function"]["name"], "description": t["function"]["description"], "input_schema": t["function"]["parameters"]} for t in tools]
+                index += 1
+
+                results = []
+                while index < len(messages) and messages[index].get("role") == "tool":
+                    tool_message = messages[index]
+                    tool_id = tool_message.get("tool_call_id")
+                    if not tool_id:
+                        raise RuntimeError("В истории Anthropic отсутствует tool_call_id")
+                    results.append({
+                        "type": "tool_result",
+                        "tool_use_id": str(tool_id),
+                        "content": str(tool_message.get("content", "")),
+                    })
+                    index += 1
+                if results:
+                    converted.append({"role": "user", "content": results})
+                continue
+
+            converted.append({"role": role, "content": message.get("content", "")})
+            index += 1
+
+        api_tools = [{
+            "name": item["function"]["name"],
+            "description": item["function"]["description"],
+            "input_schema": item["function"]["parameters"],
+        } for item in tools]
         client = anthropic.AsyncAnthropic(api_key=self.api_key)
-        result = await client.messages.create(model=self.model, max_tokens=4096, system=system, messages=converted, tools=api_tools)
-        calls = [{"function": {"name": block.name, "arguments": block.input}} for block in result.content if block.type == "tool_use"]
-        text = "\n".join(block.text for block in result.content if block.type == "text")
-        return {"role": "assistant", "content": text, "tool_calls": calls}
+        result = await client.messages.create(
+            model=self.model,
+            max_tokens=4096,
+            system=system,
+            messages=converted,
+            tools=api_tools,
+        )
+        calls = [{
+            "id": block.id,
+            "function": {"name": block.name, "arguments": block.input},
+        } for block in result.content if block.type == "tool_use"]
+        answer = "\n".join(block.text for block in result.content if block.type == "text")
+        return {"role": "assistant", "content": answer, "tool_calls": calls}
 
 
 class OpenRouterProvider:
-    """OpenRouter adapter using its OpenAI-compatible Chat Completions API."""
+    """OpenRouter adapter using the OpenAI-compatible Chat Completions API."""
     def __init__(self, api_key: str, model: str, base_url: str = "https://openrouter.ai/api/v1"):
-        self.api_key = api_key
-        self.model = model
+        self.api_key, self.model = api_key, model
         self.base_url = base_url.rstrip("/")
 
-    def _request(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
-        # The shared service stores tool results by function name (Ollama-style).
-        # OpenAI-compatible APIs additionally require tool_call_id on each result.
-        api_messages: list[dict[str, Any]] = []
+    def _request(self, messages, tools):
+        api_messages = []
         pending_ids: dict[str, list[str]] = {}
         for message in messages:
             item = dict(message)
             if item.get("role") == "assistant" and item.get("tool_calls"):
-                normalized_calls = []
-                for index, call in enumerate(item["tool_calls"]):
-                    call = dict(call)
-                    fn = call.get("function", {})
-                    call_id = call.get("id") or f"call_{len(api_messages)}_{index}"
+                normalized = []
+                for index, original in enumerate(item["tool_calls"]):
+                    call = dict(original)
+                    fn = dict(call.get("function") or {})
+                    call_id = str(call.get("id") or f"echo_call_{len(api_messages)}_{index}")
                     call["id"] = call_id
                     call["type"] = "function"
+                    args = fn.get("arguments", {})
+                    if not isinstance(args, str):
+                        fn["arguments"] = json.dumps(args, ensure_ascii=False)
+                    call["function"] = fn
                     pending_ids.setdefault(fn.get("name", ""), []).append(call_id)
-                    normalized_calls.append(call)
-                item["tool_calls"] = normalized_calls
+                    normalized.append(call)
+                item["tool_calls"] = normalized
             elif item.get("role") == "tool":
-                ids = pending_ids.get(item.get("name", ""), [])
-                if ids:
-                    item["tool_call_id"] = ids.pop(0)
-                else:
-                    # A malformed history should fail clearly rather than send an invalid request.
+                tool_id = item.get("tool_call_id")
+                if not tool_id:
+                    ids = pending_ids.get(item.get("name", ""), [])
+                    if ids:
+                        tool_id = ids.pop(0)
+                if not tool_id:
                     raise RuntimeError(f"Не найден tool_call_id для инструмента {item.get('name', '')}")
+                item["tool_call_id"] = str(tool_id)
             api_messages.append(item)
 
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": api_messages,
-            "stream": False,
-        }
+        payload = {"model": self.model, "messages": api_messages, "stream": False}
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = Request(
             self.base_url + "/chat/completions",
-            data=body,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
@@ -124,7 +177,6 @@ class OpenRouterProvider:
             with urlopen(request, timeout=120) as response:
                 data = json.loads(response.read(4_000_000))
         except Exception as exc:
-            # Include the provider's useful HTTP response without exposing the API key.
             if hasattr(exc, "read"):
                 try:
                     detail = exc.read(4000).decode("utf-8", errors="replace")
@@ -134,10 +186,14 @@ class OpenRouterProvider:
                 except Exception:
                     pass
             raise
+
         choices = data.get("choices") or []
         if not choices:
             raise RuntimeError(f"OpenRouter вернул пустой ответ: {data.get('error', data)}")
-        return choices[0].get("message") or {}
+        message = choices[0].get("message")
+        if not isinstance(message, dict):
+            raise RuntimeError("OpenRouter вернул ответ неверного формата")
+        return message
 
-    async def respond(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+    async def respond(self, messages, tools):
         return await asyncio.to_thread(self._request, messages, tools)

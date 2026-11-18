@@ -45,6 +45,7 @@ android.archs = arm64-v8a
 
 # Use develop branch of python-for-android for latest compatibility fixes
 p4a.branch = develop
+p4a.commit = 5865575d81d53617784428ee29f57be2716311ea
 
 # Android entry point
 android.entrypoint = org.kivy.android.PythonActivity

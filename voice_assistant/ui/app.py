@@ -155,6 +155,7 @@ class AsyncWorker:
     def __init__(self):
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._run, daemon=True)
+        self._closed = False
         self.thread.start()
 
     def _run(self):
@@ -162,11 +163,33 @@ class AsyncWorker:
         self.loop.run_forever()
 
     def submit(self, coroutine) -> Future:
+        if self._closed:
+            coroutine.close()
+            raise RuntimeError("Фоновый обработчик уже остановлен")
         return asyncio.run_coroutine_threadsafe(coroutine, self.loop)
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
+
+        async def cancel_pending():
+            current = asyncio.current_task()
+            tasks = [task for task in asyncio.all_tasks() if task is not current]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        try:
+            shutdown = asyncio.run_coroutine_threadsafe(cancel_pending(), self.loop)
+            shutdown.result(timeout=3)
+        except Exception:
+            pass
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.thread.join(timeout=2)
+        if not self.thread.is_alive():
+            self.loop.close()
 
 
 # ---------------------------------------------------------------------------
@@ -175,19 +198,79 @@ class AsyncWorker:
 class RootWidget(BoxLayout):
     status_text = StringProperty('Готов')
 
+    @staticmethod
+    def _escape_markup(value: str) -> str:
+        # Escape model/user text while preserving intentional UI markup tags.
+        return str(value).replace("&", "&amp;").replace("[", "&bl;").replace("]", "&br;")
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.settings = Settings.load()
         self.worker = AsyncWorker()
         self.service = None
         self._recording = False
+        self._speech_callback_bound = False
         Clock.schedule_once(self._init_service, 0.5)
 
     def _init_service(self, dt=None):
         try:
             async def approve(action: str) -> bool:
-                # На Android пока автоподтверждение для SAFE/CONFIRM
-                return True
+                # SAFE tools do not reach this callback. Every other permitted
+                # action requires a visible, explicit decision from the user.
+                decision = {"approved": False}
+                finished = threading.Event()
+                popup_ref = {"popup": None}
+
+                @mainthread
+                def show_confirmation():
+                    body = BoxLayout(orientation="vertical", padding=12, spacing=10)
+                    description = Label(
+                        text="Ассистент хочет выполнить действие:\n\n" + str(action)[:700],
+                        markup=False,
+                        halign="left",
+                        valign="middle",
+                    )
+                    description.bind(size=lambda inst, val: setattr(inst, "text_size", val))
+                    body.add_widget(description)
+
+                    buttons = BoxLayout(size_hint_y=None, height="48dp", spacing=8)
+                    popup = Popup(
+                        title="Подтверждение действия",
+                        content=body,
+                        size_hint=(0.92, None),
+                        height="300dp",
+                        auto_dismiss=True,
+                    )
+                    popup_ref["popup"] = popup
+
+                    def finish(approved):
+                        if finished.is_set():
+                            return
+                        decision["approved"] = bool(approved)
+                        finished.set()
+                        if popup.parent:
+                            popup.dismiss()
+
+                    popup.bind(on_dismiss=lambda *_: finish(False))
+                    cancel = Button(text="Отклонить")
+                    confirm = Button(text="Подтвердить")
+                    cancel.bind(on_release=lambda *_: finish(False))
+                    confirm.bind(on_release=lambda *_: finish(True))
+                    buttons.add_widget(cancel)
+                    buttons.add_widget(confirm)
+                    body.add_widget(buttons)
+                    popup.open()
+
+                show_confirmation()
+                completed = await asyncio.to_thread(finished.wait, 120)
+                if not completed:
+                    @mainthread
+                    def close_timed_out_popup():
+                        popup = popup_ref["popup"]
+                        if popup is not None and popup.parent:
+                            popup.dismiss()
+                    close_timed_out_popup()
+                return bool(completed and decision["approved"])
             self.service = create_service(self.settings, approve)
             self._update_status('Подключено ✓')
             self._add_system_message('Ассистент готов к работе! Введите запрос или нажмите 🎤')
@@ -229,7 +312,7 @@ class RootWidget(BoxLayout):
         scroll = self.ids.scroll_view
 
         lbl = Label(
-            text=f'[color=8888aa]{text}[/color]',
+            text=f'[color=8888aa]{self._escape_markup(text)}[/color]',
             markup=True,
             size_hint_y=None,
             halign='center',
@@ -245,7 +328,7 @@ class RootWidget(BoxLayout):
 
     @mainthread
     def _add_error(self, text: str):
-        self._add_message(f'[color=ff5555]⚠ {text}[/color]')
+        self._add_message(f'[color=ff5555]⚠ {self._escape_markup(text)}[/color]')
 
     def send_message(self):
         text_input = self.ids.text_input
@@ -254,7 +337,7 @@ class RootWidget(BoxLayout):
             return
         text_input.text = ''
 
-        self._add_message(f'[b]Вы:[/b] {text}', is_user=True)
+        self._add_message(f'[b]Вы:[/b] {self._escape_markup(text)}', is_user=True)
 
         if not self.service:
             self._add_error('Сервис не подключён. Проверьте настройки (⚙)')
@@ -267,7 +350,7 @@ class RootWidget(BoxLayout):
     def _on_response(self, future: Future):
         try:
             result = future.result()
-            self._add_message(f'[b]Ассистент:[/b] {result}')
+            self._add_message(f'[b]Ассистент:[/b] {self._escape_markup(result)}')
             self._update_status('Готов')
         except Exception as e:
             self._add_error(str(e) or type(e).__name__)
@@ -301,11 +384,11 @@ class RootWidget(BoxLayout):
             intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, 'ru-RU')
             intent.putExtra(RecognizerIntent.EXTRA_PROMPT, 'Говорите...')
 
-            activity.startActivityForResult(intent, 1001)
-
-            # We'll handle the result via the activity callback
             from android.activity import bind as activity_bind  # type: ignore[import]
-            activity_bind(on_activity_result=self._on_speech_result)
+            if not self._speech_callback_bound:
+                activity_bind(on_activity_result=self._on_speech_result)
+                self._speech_callback_bound = True
+            activity.startActivityForResult(intent, 1001)
         except Exception as e:
             self._add_error(f'Ошибка распознавания речи: {e}')
             self._update_status('Готов')
@@ -321,7 +404,7 @@ class RootWidget(BoxLayout):
             if results and results.size() > 0:
                 text = results.get(0)
                 if text:
-                    self._add_message(f'[b]Вы (голос):[/b] {text}', is_user=True)
+                    self._add_message(f'[b]Вы (голос):[/b] {self._escape_markup(text)}', is_user=True)
                     if self.service:
                         self._update_status('Думаю...')
                         future = self.worker.submit(self.service.handle_text(text))
@@ -420,6 +503,13 @@ class VoiceAssistantApp(App):
 
     def on_stop(self):
         root = self.root
+        if root and getattr(root, '_speech_callback_bound', False):
+            try:
+                from android.activity import unbind  # type: ignore[import]
+                unbind(on_activity_result=root._on_speech_result)
+            except Exception:
+                pass
+            root._speech_callback_bound = False
         if root and hasattr(root, 'worker'):
             root.worker.close()
 

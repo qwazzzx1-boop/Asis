@@ -20,7 +20,12 @@ class CredentialStore:
 
     def _save(self, data: dict[str, str]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        temporary_path = self._path.with_suffix(self._path.suffix + ".tmp")
+        temporary_path.write_text(
+            json.dumps(data, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        temporary_path.replace(self._path)
 
     def get(self, name: str) -> str | None:
         return self._load().get(name)

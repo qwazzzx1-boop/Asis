@@ -51,7 +51,12 @@ class Settings:
             "games": self.games,
             "ollama_remote": self.ollama_remote,
         }
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary_path = path.with_suffix(path.suffix + ".tmp")
+        temporary_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, path)
         return path
 
     @classmethod

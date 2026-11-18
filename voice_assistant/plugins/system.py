@@ -206,7 +206,6 @@ class SystemTools:
         package = _ANDROID_PACKAGES.get(query)
 
         if package and _is_android():
-            await self.gate.check(f"Запустить {executable} ({package})", RiskLevel.CONFIRM)
             if _launch_android_package(package):
                 return f"Запущено: {executable}"
             # Пакет не установлен — пробуем веб-версию
@@ -219,7 +218,6 @@ class SystemTools:
         # Не Android или нет пакета — пробуем веб
         url = _WEB_FALLBACK.get(query)
         if url:
-            await self.gate.check(f"Открыть {url}", RiskLevel.SAFE)
             if _is_android():
                 _open_url_android(url)
             else:
@@ -234,7 +232,6 @@ class SystemTools:
         parsed = urlparse(url)
         if parsed.scheme not in {"https", "http"} or not parsed.netloc:
             raise ValueError("Допускаются только HTTP(S) адреса")
-        await self.gate.check(f"Открыть сайт {parsed.netloc}", RiskLevel.SAFE)
         if _is_android():
             _open_url_android(url)
         else:
