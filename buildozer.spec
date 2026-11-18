@@ -20,7 +20,7 @@ version = 1.0.0
 
 # Application requirements
 # NOTE: pyjnius is included automatically for android
-requirements = python3,kivy,openssl
+requirements = python3,kivy,openssl,certifi
 
 # Supported orientations (portrait, landscape, all)
 orientation = portrait
