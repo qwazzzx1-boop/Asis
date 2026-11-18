@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 from typing import Any, Protocol
 from urllib.request import Request, urlopen
+
+try:
+    import certifi
+except ImportError:  # pragma: no cover - packaging error is reported at request time
+    certifi = None
 
 
 class ModelProvider(Protocol):
@@ -173,8 +179,13 @@ class OpenRouterProvider:
             },
             method="POST",
         )
+        if certifi is None:
+            raise RuntimeError("В APK отсутствует пакет certifi с корневыми сертификатами. Пересоберите приложение.")
+        # Android Python builds do not consistently expose the system CA store to
+        # urllib. certifi provides the public root CAs while TLS verification stays on.
+        tls_context = ssl.create_default_context(cafile=certifi.where())
         try:
-            with urlopen(request, timeout=120) as response:
+            with urlopen(request, timeout=120, context=tls_context) as response:
                 data = json.loads(response.read(4_000_000))
         except Exception as exc:
             if hasattr(exc, "read"):
