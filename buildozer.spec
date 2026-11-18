@@ -35,7 +35,7 @@ android.api = 33
 android.minapi = 24
 
 # Android NDK version
-android.ndk = 25b
+android.ndk = 28c
 
 # Android SDK version  
 android.sdk = 33
