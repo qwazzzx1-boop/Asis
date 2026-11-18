@@ -316,7 +316,7 @@ class RootWidget(BoxLayout):
         body.add_widget(Label(text="ПРОВАЙДЕР", color=MUTED, size_hint_y=None, height=dp(20), halign="left"))
         provider = Spinner(
             text=self.settings.provider,
-            values=("openrouter", "ollama", "anthropic"),
+            values=("openrouter", "ollama"),
             size_hint_y=None,
             height=dp(46),
             background_normal="",
