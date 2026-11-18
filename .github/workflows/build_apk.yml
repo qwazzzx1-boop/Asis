@@ -36,7 +36,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools
           pip install "Cython==0.29.33" virtualenv
-          pip install buildozer
+          pip install buildozer certifi
 
       - name: Run Python regression tests
         run: |
@@ -50,7 +50,7 @@ jobs:
         if: failure()
         run: |
           echo "=== Generated AndroidManifest.xml files ==="
-          find .buildozer -type f -name AndroidManifest.xml -print
+          find .buildozer -type f -name AndroidManifest.xml -print || true
           python - <<'PY'
           import glob
           import xml.etree.ElementTree as ET
