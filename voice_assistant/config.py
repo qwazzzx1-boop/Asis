@@ -9,12 +9,10 @@ import os
 def _app_dir() -> Path:
     """Return a writable app-private directory on any platform."""
     try:
-        # Android: use the app files directory
         from android.storage import app_storage_path  # type: ignore[import]
         return Path(app_storage_path())
     except ImportError:
         pass
-    # Desktop fallback
     base = Path(os.environ.get("APPDATA", Path.home() / ".config")) / "VoiceAssistant"
     base.mkdir(parents=True, exist_ok=True)
     return base
@@ -23,17 +21,16 @@ def _app_dir() -> Path:
 @dataclass
 class Settings:
     language: str = "ru"
-    provider: str = "ollama"
-    model: str = "qwen2.5:7b"
-    ollama_url: str = "http://192.168.0.100:11434"  # LAN IP — Ollama на ПК
+    # OpenRouter is the sensible mobile default: it does not require a PC/LAN Ollama host.
+    provider: str = "openrouter"
+    model: str = "openai/gpt-4o-mini"
+    ollama_url: str = "http://192.168.0.100:11434"
     confirmation_messages: bool = True
     allowed_roots: list[str] = field(default_factory=list)
     telegram_credential: str = "voice-assistant.telegram-bot"
     discord_credential: str = "voice-assistant.discord-bot"
     games: list[dict[str, object]] = field(default_factory=list)
-
-    # --- Android-specific ---
-    ollama_remote: bool = True  # Use remote Ollama over LAN
+    ollama_remote: bool = True
 
     def save(self, path: Path | None = None) -> Path:
         if path is None:
@@ -52,10 +49,7 @@ class Settings:
             "ollama_remote": self.ollama_remote,
         }
         temporary_path = path.with_suffix(path.suffix + ".tmp")
-        temporary_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        temporary_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary_path, path)
         return path
 
@@ -69,10 +63,22 @@ class Settings:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return cls()
+
+        provider = data.get("provider", "openrouter")
+        model = data.get("model", "openai/gpt-4o-mini")
+        # Migrate the app's old untouched defaults, which silently sent Android
+        # requests to a made-up LAN Ollama address instead of the configured API.
+        if (
+            provider == "ollama"
+            and model == "qwen2.5:7b"
+            and data.get("ollama_url", "http://192.168.0.100:11434") == "http://192.168.0.100:11434"
+        ):
+            provider, model = "openrouter", "openai/gpt-4o-mini"
+
         return cls(
             language=data.get("language", "ru"),
-            provider=data.get("provider", "ollama"),
-            model=data.get("model", "qwen2.5:7b"),
+            provider=provider,
+            model=model,
             ollama_url=data.get("ollama_url", "http://192.168.0.100:11434"),
             confirmation_messages=data.get("confirmation_messages", True),
             allowed_roots=data.get("allowed_roots", []),
