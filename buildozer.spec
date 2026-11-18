@@ -51,7 +51,7 @@ p4a.commit = 5865575d81d53617784428ee29f57be2716311ea
 android.entrypoint = org.kivy.android.PythonActivity
 
 # Android app theme
-android.apptheme = "@android:style/Theme.NoTitleBar"
+android.apptheme = @android:style/Theme.NoTitleBar
 
 # Fullscreen mode (0 = no, 1 = yes)
 fullscreen = 0
